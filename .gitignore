@@ -6,3 +6,4 @@ build/
 .env
 .pytest_cache/
 profiles/
+routines/
