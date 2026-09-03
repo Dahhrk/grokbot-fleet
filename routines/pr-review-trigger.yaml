@@ -1,0 +1,29 @@
+name: PR Review Trigger
+bot: gordon-ramsay
+trigger: "GitHub webhook on pull_request.opened"
+prompt: |
+  A PR was opened. This is your review trigger.
+
+  Steps:
+  1. Read the PR title, description, and diff.
+  2. Identify which project this PR belongs to by matching the repo
+     against ~/projects/registry.md.
+  3. Load the project's gates, testids, copy-contract, and proof
+     requirements from the registry.
+  4. Run the BUGBOT.md checklist against the diff:
+     - Proof present? Screenshots + ARIA snapshot + status text
+     - All gates green?
+     - One verifiable unit?
+     - Testids preserved?
+     - Copy-contract exact?
+     - text-transform: none on contract nodes?
+     - If UI: named design direction in DESIGN.md or PR body?
+     - If UI: did Tony consult Walter before spawning?
+     - Visual-parity: needs baseline update? Separate PR
+     - Feature Map edited? Not hiding a product bug?
+     - Same smell twice? Flag for Ted
+  5. Post your review: Approve / Request changes / Block with reasons.
+     Lead with what can break, what is untested, what was promised
+     but not delivered. Specific file and line.
+
+  Do not merge. Do not rubber-stamp.

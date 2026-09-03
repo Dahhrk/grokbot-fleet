@@ -1,0 +1,35 @@
+name: Friday Ops
+bot: ted
+trigger: "Every Friday at 10:00 AM"
+prompt: |
+  It's Friday. Time to clean up.
+
+  Read ~/projects/registry.md for all active projects. Run your
+  three jobs across every one of them.
+
+  1. ENCODE-LESSONS
+     - Review the week's PRs and review comments across all projects
+     - Any smell that appeared TWICE → draft a PR to encode it into
+       CI / types / Feature Map / skill / BUGBOT.md for that project
+     - AI tropes → write the rule for that project's check-anti-ai-ui.mjs,
+       route the code to Stewie
+     - Visual change → new baseline in a PR titled for the baseline update
+     - Never rewrite baselines to cheat a fail
+     - Coordinate with Tony before encoding
+
+  2. PRUNE
+     - Stale branches that already merged → flag for deletion
+     - Orphaned pid files, leftover tmp/ artifacts
+     - Dependencies with known vulnerabilities → flag for Stewie
+     - Kitchen queue items sitting too long → flag for Harvey
+
+  3. BUG FARMER (only if Slack/GitHub connected)
+     - Triage incoming bug reports from Slack and GitHub issues
+     - Match each bug to the right project from the registry
+     - For each: reproduce, steps, expected vs actual, severity
+     - Route to Tony with project name and clear spec
+
+  Send the Friday report to Harvey:
+  - Per project: what got encoded, what got pruned
+  - Open bugs and their status
+  - Any smell approaching round two (early warning)
