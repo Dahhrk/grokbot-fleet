@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 from starlette.responses import Response
@@ -12,6 +13,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 from grokbot_fleet.store import Store
+from grokbot_fleet.guardrails import run_guardrails
 from grokbot_fleet.jobs import (
     ConcurrentWriteError,
     JobManager,
@@ -83,15 +85,19 @@ def register_tools(
 
     # ── writes (job inbox + webhook) ─────────────────────────────
 
+    def _guard(action: str, payload: dict) -> None:
+        rejection = run_guardrails(action, payload)
+        if rejection:
+            raise ToolError(_error(422, rejection))
+
     @mcp.tool(description="Create a new Grok Bot.")
     async def create_bot(name: str, description: str) -> str:
         if store.bot_count() >= MAX_BOTS:
             raise ToolError(_error(422, "bot limit reached (max 50)"))
+        payload = {"name": name, "description": description}
+        _guard("create_bot", payload)
         try:
-            result = await job_mgr.submit(
-                "create_bot",
-                {"name": name, "description": description},
-            )
+            result = await job_mgr.submit("create_bot", payload)
         except ConcurrentWriteError:
             raise ToolError(_error(409, "another write is in progress"))
         except WebhookError as exc:
@@ -111,6 +117,7 @@ def register_tools(
             payload["name"] = name
         if description is not None:
             payload["description"] = description
+        _guard("update_bot", payload)
         try:
             result = await job_mgr.submit("update_bot", payload)
         except ConcurrentWriteError:
@@ -169,6 +176,109 @@ def register_tools(
         except WebhookError as exc:
             raise ToolError(_error(503, exc.detail))
         return json.dumps(result)
+
+    @mcp.tool(
+        description=(
+            "Sync all bot profiles from the profiles/ directory in the "
+            "grokbot-fleet repo. Matches bots by name (case-insensitive). "
+            "Creates bots that don't exist yet, updates ones that do. "
+            "Pass the absolute path to the grokbot-fleet repo root."
+        ),
+    )
+    async def sync_profiles(repo_root: str) -> str:
+        import yaml  # noqa: PLC0415
+
+        profiles_dir = Path(repo_root) / "profiles"
+        if not profiles_dir.is_dir():
+            raise ToolError(_error(404, f"profiles/ not found in {repo_root}"))
+
+        profile_files = sorted(profiles_dir.glob("*.yaml"))
+        if not profile_files:
+            raise ToolError(_error(404, "no .yaml files in profiles/"))
+
+        existing = {b["name"].lower(): b for b in store.list_bots()}
+        results: list[dict] = []
+
+        for pf in profile_files:
+            spec = yaml.safe_load(pf.read_text())
+            bot_name = spec["name"]
+            bot_desc = spec["description"]
+
+            _guard("update_bot", {"name": bot_name, "description": bot_desc})
+
+            match = existing.get(bot_name.lower())
+            if match:
+                try:
+                    r = await job_mgr.submit(
+                        "update_bot",
+                        {
+                            "bot_id": match["id"],
+                            "name": bot_name,
+                            "description": bot_desc,
+                        },
+                    )
+                    results.append({"bot": bot_name, "action": "updated", **r})
+                except ConcurrentWriteError:
+                    results.append({"bot": bot_name, "error": "concurrent write"})
+                except WebhookError as exc:
+                    results.append({"bot": bot_name, "error": exc.detail})
+            else:
+                if store.bot_count() >= MAX_BOTS:
+                    results.append({"bot": bot_name, "error": "bot limit reached"})
+                    continue
+                try:
+                    r = await job_mgr.submit(
+                        "create_bot",
+                        {"name": bot_name, "description": bot_desc},
+                    )
+                    results.append({"bot": bot_name, "action": "created", **r})
+                except ConcurrentWriteError:
+                    results.append({"bot": bot_name, "error": "concurrent write"})
+                except WebhookError as exc:
+                    results.append({"bot": bot_name, "error": exc.detail})
+
+        return json.dumps(results, indent=2)
+
+    @mcp.tool(
+        description=(
+            "Sync routines from the routines/ directory in the grokbot-fleet "
+            "repo. Creates routines on the Fleet bot. "
+            "Pass the absolute path to the grokbot-fleet repo root."
+        ),
+    )
+    async def sync_routines(repo_root: str) -> str:
+        import yaml  # noqa: PLC0415
+
+        routines_dir = Path(repo_root) / "routines"
+        if not routines_dir.is_dir():
+            raise ToolError(_error(404, f"routines/ not found in {repo_root}"))
+
+        routine_files = sorted(routines_dir.glob("*.yaml"))
+        if not routine_files:
+            raise ToolError(_error(404, "no .yaml files in routines/"))
+
+        results: list[dict] = []
+        for rf in routine_files:
+            spec = yaml.safe_load(rf.read_text())
+            routine_name = spec["name"]
+            routine_prompt = spec["prompt"]
+
+            try:
+                r = await job_mgr.submit(
+                    "create_routine",
+                    {
+                        "bot_id": fleet_bot_id,
+                        "name": routine_name,
+                        "prompt": routine_prompt,
+                    },
+                )
+                results.append({"routine": routine_name, "action": "created", **r})
+            except ConcurrentWriteError:
+                results.append({"routine": routine_name, "error": "concurrent write"})
+            except WebhookError as exc:
+                results.append({"routine": routine_name, "error": exc.detail})
+
+        return json.dumps(results, indent=2)
 
     @mcp.tool(description="Write a user skill.")
     async def write_skill(name: str, body: str) -> str:
