@@ -12,7 +12,7 @@ class ConcurrentWriteError(Exception):
 
 
 class WebhookError(Exception):
-    """Raised when the webhook POST fails (unreachable, timeout, 5xx)."""
+    """Raised when the webhook POST fails (unreachable, timeout, non-2xx)."""
 
     def __init__(self, detail: str = "webhook unreachable") -> None:
         self.detail = detail
@@ -114,7 +114,7 @@ class JobManager:
                         "Content-Type": "application/json",
                     },
                 )
-                if resp.status_code >= 500:
+                if not (200 <= resp.status_code < 300):
                     raise WebhookError(f"webhook returned {resp.status_code}")
         except httpx.HTTPError as exc:
             raise WebhookError(str(exc)) from exc

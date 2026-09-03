@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from grokbot_fleet.jobs import JobManager
+from grokbot_fleet.jobs import JobManager, WebhookError
 from tests.conftest import TEST_WEBHOOK_KEY, TEST_WEBHOOK_URL
 
 
@@ -161,3 +161,86 @@ async def test_webhook_timeout_is_8s(
         assert captured_timeout.connect == 8.0 or captured_timeout.read == 8.0
     else:
         assert float(captured_timeout) == 8.0
+
+
+def _make_response(status: int) -> httpx.Response:
+    return httpx.Response(status, request=httpx.Request("POST", TEST_WEBHOOK_URL))
+
+
+def _patch_webhook(status: int):
+    """Context manager that mocks httpx.AsyncClient to return the given status."""
+    mock_resp = _make_response(status)
+    mock_cls = patch("grokbot_fleet.jobs.httpx.AsyncClient")
+    return mock_cls, mock_resp
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 429])
+async def test_webhook_4xx_raises_webhook_error(
+    job_manager: JobManager,
+    store_root: Path,
+    status: int,
+) -> None:
+    """Webhook returning 4xx must raise WebhookError, mark job as error, clear active job."""
+
+    mock_resp = _make_response(status)
+
+    with patch("grokbot_fleet.jobs.httpx.AsyncClient") as mock_cls:
+        instance = AsyncMock()
+        instance.post = AsyncMock(return_value=mock_resp)
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = instance
+
+        with pytest.raises(WebhookError, match=str(status)):
+            await job_manager.submit(
+                "create_bot",
+                {"name": "TestBot", "description": "test"},
+            )
+
+    # Job file must exist and be marked error, not left queued
+    jobs_dir = store_root / "jobs"
+    job_files = list(jobs_dir.glob("*.json"))
+    assert len(job_files) == 1
+    job = json.loads(job_files[0].read_text())
+    assert job["status"] == "error"
+    assert job["error"] == "webhook unreachable"
+
+    # Active job must be cleared so the next write is not blocked (no stale 409)
+    assert job_manager._active_job_id is None
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 429])
+async def test_webhook_4xx_body_still_correct(
+    job_manager: JobManager,
+    status: int,
+) -> None:
+    """Even on 4xx the POST body must be {v:1, job_id} only (one try, 8s)."""
+
+    mock_resp = _make_response(status)
+    captured_kwargs: dict = {}
+
+    async def capture_post(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return mock_resp
+
+    with patch("grokbot_fleet.jobs.httpx.AsyncClient") as mock_cls:
+        instance = AsyncMock()
+        instance.post = AsyncMock(side_effect=capture_post)
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+        mock_cls.return_value = instance
+
+        with pytest.raises(WebhookError):
+            await job_manager.submit(
+                "update_bot",
+                {"bot_id": "bot-1", "name": "Renamed"},
+            )
+
+    body = captured_kwargs.get("json", {})
+    assert set(body.keys()) == {"v", "job_id"}
+    assert body["v"] == 1
+    assert isinstance(body["job_id"], str)
+
+    headers = captured_kwargs.get("headers", {})
+    assert headers["Authorization"] == f"Bearer {TEST_WEBHOOK_KEY}"
+    assert headers["X-Automation-Key"] == TEST_WEBHOOK_KEY
